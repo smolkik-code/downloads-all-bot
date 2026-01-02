@@ -1,0 +1,5 @@
+cookies.txt
+.env
+*.mp4
+*.mp3
+wireguard/wg_confs/wg0.conf

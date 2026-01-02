@@ -1,0 +1,5 @@
+aiogram==3.*
+yt-dlp
+python-dotenv
+aiohttp
+yt-dlp[tiktok]

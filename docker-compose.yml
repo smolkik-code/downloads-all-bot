@@ -1,0 +1,23 @@
+services:
+  wg:
+    image: linuxserver/wireguard
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    volumes:
+      - ./wireguard:/config
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api
+    env_file: .env
+    network_mode: "service:wg"
+
+  bot:
+    build: .
+    env_file: .env
+    network_mode: "service:wg"
+    volumes:
+      - ./downloads:/downloads
+      - ./cookies:/cookies
