@@ -4,7 +4,6 @@ import threading
 import logging
 import subprocess
 import time
-import json
 from datetime import datetime
 from typing import Optional
 
@@ -36,8 +35,8 @@ from downloader import (
     download_original_quality,
     download_playlist_videos,
     download_tiktok_music,
-    add_metadata_to_video,
-    DownloadCancelled
+    add_metadata_to_audio,  # Только для аудио
+    DownloadCancelled,
 )
 from middleware import PrivateMiddleware
 from rate_limit import check_rate_limit
@@ -123,7 +122,7 @@ def cleanup_old_cache():
                 files_with_mtime.sort(key=lambda x: x[1])
                 
                 # Удаляем старые файлы пока не достигнем лимита
-                target_size_mb = CACHE_MAX_SIZE_MB * 0.8  # Оставляем 80% от лимита
+                target_size_mb = CACHE_MAX_SIZE_MB * 0.8
                 
                 for file_path, mtime, size in files_with_mtime:
                     if total_size_mb <= target_size_mb:
@@ -203,13 +202,11 @@ def make_progress_cb(loop, message):
             downloaded = d.get("downloaded_bytes", 0)
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
             
-            # Избегаем деления на ноль
             if total <= 0:
                 return
                 
             percent = min(100, downloaded * 100 / total)
 
-            # Обновляем раз в ~2% и не чаще чем раз в 2 секунды
             current_time = time.time()
             if percent - last_percent["value"] < 2 and current_time - last_update["time"] < 2:
                 return
@@ -220,7 +217,6 @@ def make_progress_cb(loop, message):
             bar = render_bar(percent)
             eta = d.get("eta")
             
-            # Безопасное форматирование ETA
             if eta is None or eta == "?":
                 eta_str = "?"
             else:
@@ -255,7 +251,6 @@ def make_playlist_progress_cb(loop, message, total_videos: int):
 
     async def update(d):
         try:
-            # Обновляем не чаще чем раз в 3 секунды
             current_time = time.time()
             if current_time - last_update["time"] < 3:
                 return
@@ -284,12 +279,12 @@ def make_playlist_progress_cb(loop, message, total_videos: int):
     return cb
 
 
-def optimize_for_telegram(input_path: str, output_path: str, metadata: dict = None) -> bool:
+def optimize_for_telegram(input_path: str, output_path: str) -> bool:
     """
-    Оптимизирует видео для телеграма с добавлением метаданных
+    Оптимизирует видео для телеграма (без метаданных)
     """
     try:
-        import shutil  # Импортируем здесь
+        import shutil
         
         # Проверяем размер файла
         file_size_mb = os.path.getsize(input_path) / (1024 * 1024)
@@ -300,21 +295,6 @@ def optimize_for_telegram(input_path: str, output_path: str, metadata: dict = No
         else:
             crf = 23
         
-        # Подготавливаем метаданные для ffmpeg
-        metadata_args = []
-        if metadata:
-            if metadata.get('title'):
-                metadata_args.extend(['-metadata', f'title={metadata["title"]}'])
-            if metadata.get('artist') or metadata.get('uploader'):
-                artist = metadata.get('artist') or metadata.get('uploader')
-                metadata_args.extend(['-metadata', f'artist={artist}'])
-            if metadata.get('description'):
-                # Обрезаем описание если слишком длинное для метаданных
-                desc = metadata['description'][:1000]
-                metadata_args.extend(['-metadata', f'comment={desc}'])
-            if metadata.get('url'):
-                metadata_args.extend(['-metadata', f'copyright={metadata["url"]}'])
-            
         cmd = [
             'ffmpeg',
             '-i', input_path,
@@ -326,7 +306,6 @@ def optimize_for_telegram(input_path: str, output_path: str, metadata: dict = No
             '-movflags', '+faststart',
             '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
             '-y',
-            *metadata_args,
             output_path
         ]
         
@@ -349,6 +328,88 @@ def optimize_for_telegram(input_path: str, output_path: str, metadata: dict = No
         import shutil
         shutil.copy2(input_path, output_path)
         return False
+
+
+def get_video_info_for_audio(video_info: dict) -> dict:
+    """Получает информацию о видео для метаданных аудио"""
+    if not video_info:
+        return {}
+    
+    metadata = {
+        'title': video_info.get('title', ''),
+        'artist': video_info.get('uploader', ''),
+        'album': video_info.get('title', '')[:50],
+        'url': video_info.get('webpage_url', ''),
+    }
+    
+    # Для TikTok добавляем информацию о музыке
+    if video_info.get('extractor') == 'TikTok':
+        if video_info.get('track'):
+            metadata['title'] = video_info.get('track', metadata['title'])
+        if video_info.get('artist'):
+            metadata['artist'] = video_info.get('artist', metadata['artist'])
+    
+    return metadata
+
+
+# -------------------- handlers --------------------
+
+@dp.message(F.text == "/start")
+async def start(message: Message):
+    await message.answer(
+        "👋 <b>Привет!</b>\n\n"
+        "📥 Я скачиваю <b>видео</b> и <b>звук из видео</b> по ссылке.\n\n"
+        "✨ <b>Новые возможности:</b>\n"
+        "• 🎬 Оригинальное качество (Instagram, TikTok)\n"
+        "• 📁 Плейлисты YouTube\n"
+        "• 🎵 Отдельный звук для TikTok\n"
+        "• 🔄 Автоочистка кэша\n\n"
+        "👉 Просто отправь ссылку.",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(F.text == "/help")
+async def help_command(message: Message):
+    await message.answer(
+        "📚 <b>Справка по командам:</b>\n\n"
+        "• <code>/start</code> - Начать работу\n"
+        "• <code>/help</code> - Эта справка\n"
+        "• <code>/cache_stats</code> - Статистика кэша\n\n"
+        "✨ <b>Поддерживаемые платформы:</b>\n"
+        "• YouTube (видео и плейлисты)\n"
+        "• TikTok (оригинальное качество + звук отдельно)\n"
+        "• Instagram (Reels, видео, IGTV)\n"
+        "• Twitter/X, Facebook, VK и другие\n\n"
+        "🎯 <b>Особенности:</b>\n"
+        "• 🎵 TikTok: можно скачать отдельно звук\n"
+        "• 🎬 Instagram/TikTok: оригинальное качество\n"
+        "• 📁 Плейлисты: загрузка всех видео\n"
+        "• 🎧 Аудио: извлечение звука из любого видео",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(F.text == "/cache_stats")
+async def cache_stats(message: Message):
+    """Показывает статистику кэша"""
+    try:
+        total_size_mb = get_cache_size_mb()
+        file_count = 0
+        
+        for root, dirs, files in os.walk(CACHE_DIR):
+            file_count += len(files)
+        
+        await message.answer(
+            f"📊 <b>Статистика кэша:</b>\n\n"
+            f"📁 Файлов: {file_count}\n"
+            f"💾 Размер: {total_size_mb:.2f} МБ\n"
+            f"⏰ Очистка: ежедневно в 3:00",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error getting cache stats: {e}")
+        await message.answer("❌ Ошибка при получении статистики кэша")
 
 
 @dp.message(F.text.startswith("http"))
@@ -451,25 +512,11 @@ async def handle_tiktok_music(callback: CallbackQuery):
         await status.edit_text("📤 <b>Отправляю звук из кэша…</b>", parse_mode="HTML")
         try:
             await callback.message.answer_audio(FSInputFile(final_path))
-            
-            # Получаем информацию о звуке для описания
-            try:
-                info = await asyncio.to_thread(extract_info, url, COOKIES_FILE)
-                if info:
-                    metadata = get_video_description(info)
-                    if metadata.get('track') or metadata.get('artist'):
-                        desc = f"🎵 <b>Звук из TikTok</b>\n\n"
-                        if metadata.get('track'):
-                            desc += f"🎶 Трек: {metadata['track']}\n"
-                        if metadata.get('artist'):
-                            desc += f"👤 Исполнитель: {metadata['artist']}\n"
-                        if metadata.get('url'):
-                            desc += f"🔗 Оригинал: {metadata['url']}"
-                        
-                        await callback.message.answer(desc, parse_mode="HTML")
-            except:
-                pass
-                
+            size_mb = os.path.getsize(final_path) / 1024 / 1024
+            await callback.message.answer(
+                f"✅ <b>Готово! (Звук из TikTok)</b>\n📦 Размер: {size_mb:.1f} МБ",
+                parse_mode="HTML"
+            )
         except Exception as e:
             logger.error(f"Error sending cached audio: {e}")
             await status.edit_text("❌ Ошибка при отправке звука")
@@ -512,13 +559,13 @@ async def handle_tiktok_music(callback: CallbackQuery):
         try:
             info = await asyncio.to_thread(extract_info, url, COOKIES_FILE)
             if info:
-                metadata = get_video_description(info)
-                await asyncio.to_thread(add_metadata_to_video, tmp_path, tmp_path + "_meta.mp3", metadata)
+                metadata = get_video_info_for_audio(info)
+                await asyncio.to_thread(add_metadata_to_audio, tmp_path, tmp_path + "_meta.mp3", metadata)
                 if os.path.exists(tmp_path + "_meta.mp3"):
                     os.remove(tmp_path)
                     os.rename(tmp_path + "_meta.mp3", tmp_path)
         except Exception as e:
-            logger.error(f"Error adding metadata: {e}")
+            logger.error(f"Error adding metadata to audio: {e}")
         
         # Перемещаем файл в кэш
         if os.path.exists(final_path):
@@ -546,29 +593,11 @@ async def handle_tiktok_music(callback: CallbackQuery):
     
     try:
         await callback.message.answer_audio(FSInputFile(final_path))
-        
-        # Отправляем описание звука
-        try:
-            info = await asyncio.to_thread(extract_info, url, COOKIES_FILE)
-            if info:
-                metadata = get_video_description(info)
-                if metadata.get('track') or metadata.get('artist'):
-                    desc = f"🎵 <b>Звук из TikTok</b>\n\n"
-                    if metadata.get('track'):
-                        desc += f"🎶 Трек: {metadata['track']}\n"
-                    if metadata.get('artist'):
-                        desc += f"👤 Исполнитель: {metadata['artist']}\n"
-                    if metadata.get('title'):
-                        desc += f"📝 Видео: {metadata['title'][:100]}...\n"
-                    if metadata.get('uploader'):
-                        desc += f"👤 Автор: {metadata['uploader']}\n"
-                    if metadata.get('url'):
-                        desc += f"🔗 Оригинал: {metadata['url']}"
-                    
-                    await callback.message.answer(desc, parse_mode="HTML")
-        except:
-            pass
-            
+        size_mb = os.path.getsize(final_path) / 1024 / 1024
+        await callback.message.answer(
+            f"✅ <b>Готово! (Звук из TikTok)</b>\n📦 Размер: {size_mb:.1f} МБ",
+            parse_mode="HTML"
+        )
     except Exception as e:
         logger.error(f"Error sending audio: {e}")
         await status.edit_text("❌ Ошибка при отправке звука")
@@ -595,13 +624,6 @@ async def handle_original_quality(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
     status = await callback.message.answer("🎬 <b>Загрузка в оригинальном качестве…</b>", parse_mode="HTML")
     
-    # Получаем информацию о видео для метаданных
-    video_info = None
-    try:
-        video_info = await asyncio.to_thread(extract_info, url, COOKIES_FILE)
-    except:
-        pass
-    
     key = cache_key(url, "original", audio=False)
     final_path = cache_path(CACHE_DIR, key, "mp4")
     tmp_path = os.path.join(TMP_DIR, f"{key}.mp4")
@@ -612,28 +634,10 @@ async def handle_original_quality(callback: CallbackQuery):
         try:
             await callback.message.answer_video(FSInputFile(final_path))
             size_mb = os.path.getsize(final_path) / 1024 / 1024
-            
-            # Отправляем описание
-            if video_info:
-                metadata = get_video_description(video_info)
-                desc = format_description(metadata)
-                if desc:
-                    await callback.message.answer(
-                        f"✅ <b>Готово! (Оригинальное качество)</b>\n"
-                        f"📦 Размер: {size_mb:.1f} МБ\n\n"
-                        f"{desc}",
-                        parse_mode="HTML"
-                    )
-                else:
-                    await callback.message.answer(
-                        f"✅ <b>Готово! (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
-                        parse_mode="HTML"
-                    )
-            else:
-                await callback.message.answer(
-                    f"✅ <b>Готово! (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
-                    parse_mode="HTML"
-                )
+            await callback.message.answer(
+                f"✅ <b>Готово! (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
+                parse_mode="HTML"
+            )
         except Exception as e:
             logger.error(f"Error sending cached file: {e}")
             await status.edit_text("❌ Ошибка при отправке файла")
@@ -660,14 +664,6 @@ async def handle_original_quality(callback: CallbackQuery):
             await status.edit_text("⛔ Загрузка отменена")
             return
             
-        # Добавляем метаданные к видео
-        if video_info:
-            metadata = get_video_description(video_info)
-            await asyncio.to_thread(add_metadata_to_video, tmp_path, tmp_path + "_meta.mp4", metadata)
-            if os.path.exists(tmp_path + "_meta.mp4"):
-                os.remove(tmp_path)
-                os.rename(tmp_path + "_meta.mp4", tmp_path)
-        
         os.rename(tmp_path, final_path)
         
     except DownloadCancelled:
@@ -695,55 +691,19 @@ async def handle_original_quality(callback: CallbackQuery):
             supports_streaming=True
         )
         size_mb = os.path.getsize(final_path) / 1024 / 1024
-        
-        # Отправляем описание
-        if video_info:
-            metadata = get_video_description(video_info)
-            desc = format_description(metadata)
-            if desc:
-                await callback.message.answer(
-                    f"✅ <b>Готово! (Оригинальное качество)</b>\n"
-                    f"📦 Размер: {size_mb:.1f} МБ\n\n"
-                    f"{desc}",
-                    parse_mode="HTML"
-                )
-            else:
-                await callback.message.answer(
-                    f"✅ <b>Готово! (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
-                    parse_mode="HTML"
-                )
-        else:
-            await callback.message.answer(
-                f"✅ <b>Готово! (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
-                parse_mode="HTML"
-            )
+        await callback.message.answer(
+            f"✅ <b>Готово! (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
+            parse_mode="HTML"
+        )
     except Exception as e:
         logger.error(f"Error sending video: {e}")
         try:
             await callback.message.answer_document(FSInputFile(final_path))
             size_mb = os.path.getsize(final_path) / 1024 / 1024
-            
-            # Отправляем описание даже если отправлено как документ
-            if video_info:
-                metadata = get_video_description(video_info)
-                desc = format_description(metadata)
-                if desc:
-                    await callback.message.answer(
-                        f"✅ <b>Отправлено как документ (Оригинальное качество)</b>\n"
-                        f"📦 Размер: {size_mb:.1f} МБ\n\n"
-                        f"{desc}",
-                        parse_mode="HTML"
-                    )
-                else:
-                    await callback.message.answer(
-                        f"✅ <b>Отправлено как документ (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
-                        parse_mode="HTML"
-                    )
-            else:
-                await callback.message.answer(
-                    f"✅ <b>Отправлено как документ (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
-                    parse_mode="HTML"
-                )
+            await callback.message.answer(
+                f"✅ <b>Отправлено как документ (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
+                parse_mode="HTML"
+            )
         except Exception as e2:
             logger.error(f"Error sending as document: {e2}")
             await status.edit_text("❌ Ошибка при отправке файла")
@@ -773,17 +733,6 @@ async def handle_video(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
     status = await callback.message.answer("🔍 <b>Анализирую ссылку…</b>", parse_mode="HTML")
 
-    # Извлекаем информацию о видео для метаданных
-    try:
-        video_info = await asyncio.to_thread(extract_info, url, COOKIES_FILE)
-        if not video_info:
-            await status.edit_text("❌ Не удалось получить информацию о видео")
-            return
-    except Exception as e:
-        logger.error(f"Error extracting info: {e}")
-        await status.edit_text("❌ Ошибка при анализе ссылки")
-        return
-
     key = cache_key(url, quality, audio=False)
     final_path = cache_path(CACHE_DIR, key, "mp4")
     tmp_path = os.path.join(TMP_DIR, f"{key}.mp4")
@@ -795,22 +744,10 @@ async def handle_video(callback: CallbackQuery):
         try:
             await callback.message.answer_video(FSInputFile(final_path))
             size_mb = os.path.getsize(final_path) / 1024 / 1024
-            
-            # Отправляем описание
-            metadata = get_video_description(video_info)
-            desc = format_description(metadata)
-            if desc:
-                await callback.message.answer(
-                    f"✅ <b>Готово!</b>\n"
-                    f"📦 Размер: {size_mb:.1f} МБ\n\n"
-                    f"{desc}",
-                    parse_mode="HTML"
-                )
-            else:
-                await callback.message.answer(
-                    f"✅ <b>Готово!</b>\n📦 Размер: {size_mb:.1f} МБ",
-                    parse_mode="HTML"
-                )
+            await callback.message.answer(
+                f"✅ <b>Готово!</b>\n📦 Размер: {size_mb:.1f} МБ",
+                parse_mode="HTML"
+            )
         except Exception as e:
             logger.error(f"Error sending cached file: {e}")
             await status.edit_text("❌ Ошибка при отправке файла")
@@ -839,13 +776,10 @@ async def handle_video(callback: CallbackQuery):
             await status.edit_text("⛔ Загрузка отменена")
             return
         
-        # Получаем метаданные для видео
-        metadata = get_video_description(video_info)
-        
-        # Оптимизируем видео для телеграма с добавлением метаданных
+        # Оптимизируем видео для телеграма (кроме оригинального качества)
         if quality != "original":
             await status.edit_text("⚙️ <b>Оптимизирую видео для телеграма…</b>", parse_mode="HTML")
-            await asyncio.to_thread(optimize_for_telegram, tmp_path, optimized_path, metadata)
+            await asyncio.to_thread(optimize_for_telegram, tmp_path, optimized_path)
             
             # Удаляем исходный файл и используем оптимизированный
             if os.path.exists(tmp_path):
@@ -853,11 +787,7 @@ async def handle_video(callback: CallbackQuery):
                 
             os.rename(optimized_path, final_path)
         else:
-            # Для оригинального качества не оптимизируем, но добавляем метаданны
-            await asyncio.to_thread(add_metadata_to_video, tmp_path, tmp_path + "_meta.mp4", metadata)
-            if os.path.exists(tmp_path + "_meta.mp4"):
-                os.remove(tmp_path)
-                os.rename(tmp_path + "_meta.mp4", tmp_path)
+            # Для оригинального качества не оптимизируем
             os.rename(tmp_path, final_path)
         
     except DownloadCancelled:
@@ -887,41 +817,19 @@ async def handle_video(callback: CallbackQuery):
             supports_streaming=True
         )
         size_mb = os.path.getsize(final_path) / 1024 / 1024
-        
-        # Отправляем описание
-        desc = format_description(metadata)
-        if desc:
-            await callback.message.answer(
-                f"✅ <b>Готово!</b>\n"
-                f"📦 Размер: {size_mb:.1f} МБ\n\n"
-                f"{desc}",
-                parse_mode="HTML"
-            )
-        else:
-            await callback.message.answer(
-                f"✅ <b>Готово!</b>\n📦 Размер: {size_mb:.1f} МБ",
-                parse_mode="HTML"
-            )
+        await callback.message.answer(
+            f"✅ <b>Готово!</b>\n📦 Размер: {size_mb:.1f} МБ",
+            parse_mode="HTML"
+        )
     except Exception as e:
         logger.error(f"Error sending video: {e}")
         try:
             await callback.message.answer_document(FSInputFile(final_path))
             size_mb = os.path.getsize(final_path) / 1024 / 1024
-            
-            # Отправляем описание даже если отправлено как документ
-            desc = format_description(metadata)
-            if desc:
-                await callback.message.answer(
-                    f"✅ <b>Отправлено как документ</b>\n"
-                    f"📦 Размер: {size_mb:.1f} МБ\n\n"
-                    f"{desc}",
-                    parse_mode="HTML"
-                )
-            else:
-                await callback.message.answer(
-                    f"✅ <b>Отправлено как документ</b>\n📦 Размер: {size_mb:.1f} МБ",
-                    parse_mode="HTML"
-                )
+            await callback.message.answer(
+                f"✅ <b>Отправлено как документ</b>\n📦 Размер: {size_mb:.1f} МБ",
+                parse_mode="HTML"
+            )
         except Exception as e2:
             logger.error(f"Error sending as document: {e2}")
             await status.edit_text("❌ Ошибка при отправке файла")
@@ -971,29 +879,10 @@ async def handle_audio(callback: CallbackQuery):
         try:
             await callback.message.answer_audio(FSInputFile(final_path))
             size_mb = os.path.getsize(final_path) / 1024 / 1024
-            
-            # Отправляем описание
-            if video_info:
-                metadata = get_video_description(video_info)
-                desc = f"🎧 <b>Аудио из видео</b>\n\n"
-                if metadata.get('title'):
-                    desc += f"🎬 {metadata['title']}\n"
-                if metadata.get('uploader'):
-                    desc += f"👤 Автор: {metadata['uploader']}\n"
-                if metadata.get('url'):
-                    desc += f"🔗 Оригинал: {metadata['url']}"
-                
-                await callback.message.answer(
-                    f"✅ <b>Готово!</b>\n"
-                    f"📦 Размер: {size_mb:.1f} МБ\n\n"
-                    f"{desc}",
-                    parse_mode="HTML"
-                )
-            else:
-                await callback.message.answer(
-                    f"✅ <b>Готово!</b>\n📦 Размер: {size_mb:.1f} МБ",
-                    parse_mode="HTML"
-                )
+            await callback.message.answer(
+                f"✅ <b>Готово!</b>\n📦 Размер: {size_mb:.1f} МБ",
+                parse_mode="HTML"
+            )
         except Exception as e:
             logger.error(f"Error sending cached audio: {e}")
             await status.edit_text("❌ Ошибка при отправке аудио")
@@ -1033,8 +922,8 @@ async def handle_audio(callback: CallbackQuery):
         
         # Добавляем метаданные к аудио
         if video_info:
-            metadata = get_video_description(video_info)
-            await asyncio.to_thread(add_metadata_to_video, tmp_path, tmp_path + "_meta.mp3", metadata)
+            metadata = get_video_info_for_audio(video_info)
+            await asyncio.to_thread(add_metadata_to_audio, tmp_path, tmp_path + "_meta.mp3", metadata)
             if os.path.exists(tmp_path + "_meta.mp3"):
                 os.remove(tmp_path)
                 os.rename(tmp_path + "_meta.mp3", tmp_path)
@@ -1066,33 +955,10 @@ async def handle_audio(callback: CallbackQuery):
     try:
         await callback.message.answer_audio(FSInputFile(final_path))
         size_mb = os.path.getsize(final_path) / 1024 / 1024
-        
-        # Отправляем описание
-        if video_info:
-            metadata = get_video_description(video_info)
-            desc = f"🎧 <b>Аудио из видео</b>\n\n"
-            if metadata.get('title'):
-                desc += f"🎬 {metadata['title']}\n"
-            if metadata.get('uploader'):
-                desc += f"👤 Автор: {metadata['uploader']}\n"
-            if metadata.get('duration'):
-                minutes = metadata['duration'] // 60
-                seconds = metadata['duration'] % 60
-                desc += f"⏱ Длительность: {minutes}:{seconds:02d}\n"
-            if metadata.get('url'):
-                desc += f"🔗 Оригинал: {metadata['url']}"
-            
-            await callback.message.answer(
-                f"✅ <b>Готово!</b>\n"
-                f"📦 Размер: {size_mb:.1f} МБ\n\n"
-                f"{desc}",
-                parse_mode="HTML"
-            )
-        else:
-            await callback.message.answer(
-                f"✅ <b>Готово!</b>\n📦 Размер: {size_mb:.1f} МБ",
-                parse_mode="HTML"
-            )
+        await callback.message.answer(
+            f"✅ <b>Готово!</b>\n📦 Размер: {size_mb:.1f} МБ",
+            parse_mode="HTML"
+        )
     except Exception as e:
         logger.error(f"Error sending audio: {e}")
         await status.edit_text("❌ Ошибка при отправке аудио")
@@ -1269,6 +1135,47 @@ async def download_playlist_confirm(callback, user_id, playlist_info, status):
     finally:
         ACTIVE_DOWNLOADS.pop(user_id, None)
         cleanup_tmp(TMP_DIR)
+
+
+@dp.callback_query(F.data == "playlist_confirm_no")
+async def handle_playlist_cancel(callback: CallbackQuery):
+    await callback.answer("Отменено", show_alert=True)
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+
+@dp.callback_query(F.data == "playlist_first")
+async def handle_playlist_first(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    url = USER_URLS.get(user_id)
+    
+    if not url:
+        await callback.message.answer("❌ Ссылка не найдена")
+        return
+    
+    # Получаем первое видео из плейлиста
+    try:
+        from info import get_first_video_from_playlist
+        video_url = await asyncio.to_thread(get_first_video_from_playlist, url)
+        
+        if not video_url:
+            await callback.message.answer("❌ Не удалось получить видео из плейлиста")
+            return
+        
+        # Сохраняем новую ссылку и показываем меню выбора качества
+        USER_URLS[user_id] = video_url
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "🔽 <b>Выбери формат загрузки для первого видео:</b>",
+            reply_markup=quality_keyboard(),
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting first video: {e}")
+        await callback.message.answer("❌ Ошибка при получении видео из плейлиста")
+
+
 # -------------------- entrypoint --------------------
 
 async def main():

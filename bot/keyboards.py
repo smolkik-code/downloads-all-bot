@@ -5,6 +5,7 @@ def quality_keyboard():
     """Клавиатура выбора качества"""
     keyboard = [
         [
+            InlineKeyboardButton(text="📹 480p", callback_data="q:480"),
             InlineKeyboardButton(text="📹 720p", callback_data="q:720"),
             InlineKeyboardButton(text="🎬 1080p", callback_data="q:1080"),
             InlineKeyboardButton(text="🎥 1440p", callback_data="q:1440"),
@@ -48,24 +49,40 @@ def playlist_keyboard(confirm=False):
 
 
 def platform_keyboard(platform):
-    """Клавиатура для Instagram/TikTok"""
-    if platform == "instagram":
-        text = "📸 Instagram"
-    elif platform == "tiktok":
-        text = "🎵 TikTok"
-    else:
-        text = platform.capitalize()
-    
+    """Клавиатура для Instagram"""
     keyboard = [
         [
             InlineKeyboardButton(text=f"🎬 Оригинальное качество", callback_data="original_quality"),
         ],
         [
+            InlineKeyboardButton(text="📹 480p", callback_data="q:480"),
             InlineKeyboardButton(text="📹 720p", callback_data="q:720"),
             InlineKeyboardButton(text="🎬 1080p", callback_data="q:1080"),
         ],
         [
             InlineKeyboardButton(text="🎧 Аудио", callback_data="audio"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def tiktok_keyboard():
+    """Специальная клавиатура для TikTok"""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="🎬 Оригинальное качество", callback_data="original_quality"),
+        ],
+        [
+            InlineKeyboardButton(text="📹 480p", callback_data="q:480"),
+            InlineKeyboardButton(text="📹 720p", callback_data="q:720"),
+            InlineKeyboardButton(text="🎬 1080p", callback_data="q:1080"),
+        ],
+        [
+            InlineKeyboardButton(text="🎧 Аудио из видео", callback_data="audio"),
+            InlineKeyboardButton(text="🎵 Только звук (TikTok)", callback_data="tiktok_music"),
+        ],
+        [
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
         ]
     ]

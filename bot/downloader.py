@@ -4,7 +4,7 @@ import os
 import logging
 import subprocess
 import json
-import shutil  # Импортируем shutil глобально
+import shutil
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -47,20 +47,12 @@ def download_video(
             "tiktok": {"skip_impersonation": True},
             "instagram": {"skip_impersonation": True},
         },
-        "writedescription": True,
-        "writeinfojson": True,
+        "concurrent_fragment_downloads": 4,
+        "http_chunk_size": 10485760,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        
-        # Сохраняем информацию о видео рядом с файлом
-        info_file = out_path.replace('.mp4', '.info.json')
-        try:
-            with open(info_file, 'w', encoding='utf-8') as f:
-                json.dump(info, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        ydl.download([url])
 
 
 # ---------------- ORIGINAL QUALITY ----------------
@@ -86,20 +78,12 @@ def download_original_quality(
             "instagram": {"skip_impersonation": True},
         },
         "format_sort": ["quality", "res", "codec", "size"],
-        "writedescription": True,
-        "writeinfojson": True,
+        "concurrent_fragment_downloads": 4,
+        "http_chunk_size": 10485760,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        
-        # Сохраняем информацию о видео
-        info_file = out_path.replace('.mp4', '.info.json')
-        try:
-            with open(info_file, 'w', encoding='utf-8') as f:
-                json.dump(info, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        ydl.download([url])
 
 
 # ---------------- TIKTOK MUSIC ONLY ----------------
@@ -121,114 +105,78 @@ def download_tiktok_music(
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": "320",
+                "preferredquality": "192",
             },
-            {"key": "FFmpegMetadata"},
         ],
         "quiet": True,
         "no_warnings": True,
         "extractor_args": {
-            "tiktok": {
-                "skip_impersonation": True,
-            },
+            "tiktok": {"skip_impersonation": True},
         },
-        "writethumbnail": True,
-        "writeinfojson": True,
+        "concurrent_fragment_downloads": 4,
+        "http_chunk_size": 10485760,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        
-        # Сохраняем информацию о звуке
-        info_file = out_path.replace('.mp3', '.info.json')
-        try:
-            with open(info_file, 'w', encoding='utf-8') as f:
-                json.dump(info, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        ydl.download([url])
 
 
-# ---------------- ADD METADATA TO VIDEO/AUDIO ----------------
+# ---------------- ADD METADATA TO AUDIO ----------------
 
-def add_metadata_to_video(
+def add_metadata_to_audio(
     input_path: str,
     output_path: str,
     metadata: dict,
 ):
-    """Добавляет метаданные к видео или аудио файлу"""
+    """Добавляет метаданные к аудио файлу"""
     try:
-        # Определяем тип файла
-        is_video = input_path.lower().endswith(('.mp4', '.mkv', '.avi', '.mov'))
-        is_audio = input_path.lower().endswith(('.mp3', '.m4a', '.flac', '.wav'))
-        
-        if not (is_video or is_audio):
-            # Если не поддерживаемый формат, просто копируем файл
+        # Проверяем metadata
+        if metadata is None:
+            metadata = {}
+            
+        if not input_path.lower().endswith('.mp3'):
             shutil.copy2(input_path, output_path)
             return
         
-        # Подготавливаем аргументы метаданных для ffmpeg
         metadata_args = []
         
+        # Добавляем метаданные
         if metadata.get('title'):
-            metadata_args.extend(['-metadata', f'title={metadata["title"]}'])
+            metadata_args.extend(['-metadata', f'title={metadata["title"][:100]}'])
         
-        if metadata.get('artist') or metadata.get('uploader'):
-            artist = metadata.get('artist') or metadata.get('uploader')
-            metadata_args.extend(['-metadata', f'artist={artist}'])
+        if metadata.get('artist'):
+            metadata_args.extend(['-metadata', f'artist={metadata["artist"][:100]}'])
         
-        if metadata.get('description'):
-            # Обрезаем описание если слишком длинное
-            desc = metadata['description'][:500]
-            metadata_args.extend(['-metadata', f'comment={desc}'])
+        if metadata.get('album'):
+            metadata_args.extend(['-metadata', f'album={metadata["album"][:100]}'])
         
-        if metadata.get('url'):
-            metadata_args.extend(['-metadata', f'copyright={metadata["url"]}'])
-        
-        # Для TikTok добавляем дополнительную информацию о музыке
-        if metadata.get('track') and metadata.get('artist'):
-            metadata_args.extend(['-metadata', f'album={metadata["track"]}'])
-        
-        if is_video:
-            # Для видео файлов
-            cmd = [
-                'ffmpeg',
-                '-i', input_path,
-                '-c', 'copy',
-                '-movflags', '+faststart',
-                '-y',
-                *metadata_args,
-                output_path
-            ]
-        else:
-            # Для аудио файлов
-            cmd = [
-                'ffmpeg',
-                '-i', input_path,
-                '-c', 'copy',
-                '-id3v2_version', '3',
-                '-y',
-                *metadata_args,
-                output_path
-            ]
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c', 'copy',
+            '-id3v2_version', '3',
+            '-loglevel', 'error',
+            '-y',
+            *metadata_args,
+            output_path
+        ]
         
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=30
         )
         
         if result.returncode != 0:
-            logger.error(f"FFmpeg metadata error: {result.stderr}")
-            # Если не удалось добавить метаданные, копируем файл как есть
             shutil.copy2(input_path, output_path)
             
     except Exception as e:
-        logger.error(f"Error adding metadata: {e}")
+        logger.error(f"Metadata error: {e}")
         shutil.copy2(input_path, output_path)
 
 
-# ---------------- PLAYLIST DOWNLOAD (ИСПРАВЛЕННАЯ ВЕРСИЯ) ----------------
+# ---------------- PLAYLIST DOWNLOAD ----------------
 
 def download_playlist_videos(
     playlist_info: dict,
@@ -237,13 +185,12 @@ def download_playlist_videos(
     cancel_event: threading.Event,
     progress_cb,
 ) -> List[str]:
-    """Скачивает все видео из плейлиста - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Скачивает все видео из плейлиста"""
     downloaded_files = []
     
-    # Создаем yt-dlp объект для загрузки каждого видео отдельно
     ydl_opts = {
         "format": "best[height<=1080]/best",
-        "outtmpl": os.path.join(output_dir, "%(title)s [%(id)s].%(ext)s"),  # Добавляем ID для уникальности
+        "outtmpl": os.path.join(output_dir, "%(title)s [%(id)s].%(ext)s"),
         "merge_output_format": "mp4",
         "cookiefile": cookies,
         "progress_hooks": [_progress_hook(cancel_event, progress_cb)],
@@ -251,9 +198,9 @@ def download_playlist_videos(
         "no_warnings": True,
         "ignoreerrors": True,
         "extract_flat": False,
-        "writedescription": True,
-        "writeinfojson": True,
-        "nooverwrites": True,  # Не перезаписывать существующие файлы
+        "nooverwrites": True,
+        "concurrent_fragment_downloads": 4,
+        "http_chunk_size": 10485760,
     }
 
     try:
@@ -333,29 +280,18 @@ def download_audio(
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": "320",
+                "preferredquality": "192",
             },
-            {"key": "FFmpegMetadata"},
-            {"key": "EmbedThumbnail"},
         ],
-        "writethumbnail": True,
         "quiet": True,
         "no_warnings": True,
         "extractor_args": {
             "tiktok": {"skip_impersonation": True},
             "instagram": {"skip_impersonation": True},
         },
-        "writedescription": True,
-        "writeinfojson": True,
+        "concurrent_fragment_downloads": 4,
+        "http_chunk_size": 10485760,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        
-        # Сохраняем информацию о аудио
-        info_file = out_path.replace('.mp3', '.info.json')
-        try:
-            with open(info_file, 'w', encoding='utf-8') as f:
-                json.dump(info, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        ydl.download([url])
