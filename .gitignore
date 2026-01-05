@@ -3,3 +3,8 @@ cookies.txt
 *.mp4
 *.mp3
 wireguard/wg_confs/wg0.conf
+*.jpg
+*.png
+*.info.json
+/cache/
+/tmp/
