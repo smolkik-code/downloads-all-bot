@@ -289,6 +289,8 @@ def optimize_for_telegram(input_path: str, output_path: str, metadata: dict = No
     Оптимизирует видео для телеграма с добавлением метаданных
     """
     try:
+        import shutil  # Импортируем здесь
+        
         # Проверяем размер файла
         file_size_mb = os.path.getsize(input_path) / (1024 * 1024)
         
@@ -303,8 +305,9 @@ def optimize_for_telegram(input_path: str, output_path: str, metadata: dict = No
         if metadata:
             if metadata.get('title'):
                 metadata_args.extend(['-metadata', f'title={metadata["title"]}'])
-            if metadata.get('artist'):
-                metadata_args.extend(['-metadata', f'artist={metadata["artist"]}'])
+            if metadata.get('artist') or metadata.get('uploader'):
+                artist = metadata.get('artist') or metadata.get('uploader')
+                metadata_args.extend(['-metadata', f'artist={artist}'])
             if metadata.get('description'):
                 # Обрезаем описание если слишком длинное для метаданных
                 desc = metadata['description'][:1000]
@@ -336,7 +339,6 @@ def optimize_for_telegram(input_path: str, output_path: str, metadata: dict = No
         
         if result.returncode != 0:
             logger.error(f"FFmpeg error: {result.stderr}")
-            import shutil
             shutil.copy2(input_path, output_path)
             return False
             
@@ -347,151 +349,6 @@ def optimize_for_telegram(input_path: str, output_path: str, metadata: dict = No
         import shutil
         shutil.copy2(input_path, output_path)
         return False
-
-
-def get_video_description(video_info: dict) -> dict:
-    """Извлекает описание и метаданные из информации о видео"""
-    metadata = {
-        'title': video_info.get('title', ''),
-        'uploader': video_info.get('uploader', ''),
-        'description': video_info.get('description', ''),
-        'duration': video_info.get('duration', 0),
-        'view_count': video_info.get('view_count', 0),
-        'like_count': video_info.get('like_count', 0),
-        'upload_date': video_info.get('upload_date', ''),
-        'url': video_info.get('webpage_url', ''),
-    }
-    
-    # Для TikTok добавляем дополнительную информацию
-    if video_info.get('extractor') == 'TikTok':
-        metadata.update({
-            'creator': video_info.get('creator', ''),
-            'track': video_info.get('track', ''),
-            'artist': video_info.get('artist', ''),
-        })
-    
-    return metadata
-
-
-def format_description(metadata: dict) -> str:
-    """Форматирует описание для отправки в сообщении"""
-    desc = []
-    
-    if metadata.get('title'):
-        desc.append(f"🎬 <b>{metadata['title']}</b>")
-    
-    if metadata.get('uploader'):
-        desc.append(f"👤 Автор: {metadata['uploader']}")
-    
-    if metadata.get('duration'):
-        minutes = metadata['duration'] // 60
-        seconds = metadata['duration'] % 60
-        desc.append(f"⏱ Длительность: {minutes}:{seconds:02d}")
-    
-    if metadata.get('view_count'):
-        views = f"{metadata['view_count']:,}".replace(',', ' ')
-        desc.append(f"👁 Просмотры: {views}")
-    
-    if metadata.get('like_count'):
-        likes = f"{metadata['like_count']:,}".replace(',', ' ')
-        desc.append(f"❤️ Лайки: {likes}")
-    
-    # Для TikTok показываем музыку
-    if metadata.get('track') and metadata.get('artist'):
-        desc.append(f"🎵 Музыка: {metadata['artist']} - {metadata['track']}")
-    
-    # Добавляем ссылку на оригинал
-    if metadata.get('url'):
-        desc.append(f"🔗 Оригинал: {metadata['url']}")
-    
-    return "\n".join(desc)
-
-
-# -------------------- handlers --------------------
-
-@dp.message(F.text == "/start")
-async def start(message: Message):
-    await message.answer(
-        "👋 <b>Привет!</b>\n\n"
-        "📥 Я скачиваю <b>видео</b> и <b>звук из видео</b> по ссылке.\n\n"
-        "✨ <b>Новые возможности:</b>\n"
-        "• 🎬 Оригинальное качество (Instagram, TikTok)\n"
-        "• 📁 Плейлисты YouTube\n"
-        "• 📝 Описание к видео файлу\n"
-        "• 🎵 Отдельный звук для TikTok\n"
-        "• 🔄 Автоочистка кэша\n\n"
-        "👉 Просто отправь ссылку.",
-        parse_mode="HTML"
-    )
-
-
-@dp.message(F.text == "/help")
-async def help_command(message: Message):
-    await message.answer(
-        "📚 <b>Справка по командам:</b>\n\n"
-        "• <code>/start</code> - Начать работу\n"
-        "• <code>/help</code> - Эта справка\n"
-        "• <code>/cache_stats</code> - Статистика кэша\n\n"
-        "✨ <b>Поддерживаемые платформы:</b>\n"
-        "• YouTube (видео и плейлисты)\n"
-        "• TikTok (оригинальное качество + звук отдельно)\n"
-        "• Instagram (Reels, видео, IGTV)\n"
-        "• Twitter/X, Facebook, VK и другие\n\n"
-        "🎯 <b>Особенности:</b>\n"
-        "• 📝 Все видео загружаются с описанием\n"
-        "• 🎵 TikTok: можно скачать отдельно звук\n"
-        "• 🎬 Instagram/TikTok: оригинальное качество\n"
-        "• 📁 Плейлисты: загрузка всех видео\n"
-        "• 🎧 Аудио: извлечение звука из любого видео",
-        parse_mode="HTML"
-    )
-
-
-@dp.message(F.text == "/cache_stats")
-async def cache_stats(message: Message):
-    """Показывает статистику кэша"""
-    try:
-        total_size_mb = get_cache_size_mb()
-        file_count = 0
-        
-        for root, dirs, files in os.walk(CACHE_DIR):
-            file_count += len(files)
-        
-        # Получаем время последнего изменения самого старого файла
-        oldest_time = None
-        newest_time = None
-        
-        for root, dirs, files in os.walk(CACHE_DIR):
-            for file in files:
-                file_path = os.path.join(root, file)
-                try:
-                    mtime = os.path.getmtime(file_path)
-                    if oldest_time is None or mtime < oldest_time:
-                        oldest_time = mtime
-                    if newest_time is None or mtime > newest_time:
-                        newest_time = mtime
-                except:
-                    pass
-        
-        if oldest_time:
-            oldest_str = datetime.fromtimestamp(oldest_time).strftime("%d.%m.%Y %H:%M")
-            newest_str = datetime.fromtimestamp(newest_time).strftime("%d.%m.%Y %H:%M")
-            age_info = f"🗓 Самый старый: {oldest_str}\n" \
-                      f"🆕 Самый новый: {newest_str}"
-        else:
-            age_info = "🗓 Кэш пуст"
-        
-        await message.answer(
-            f"📊 <b>Статистика кэша:</b>\n\n"
-            f"📁 Файлов: {file_count}\n"
-            f"💾 Размер: {total_size_mb:.2f} МБ\n"
-            f"⏰ Очистка: ежедневно в 3:00\n\n"
-            f"{age_info}",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.error(f"Error getting cache stats: {e}")
-        await message.answer("❌ Ошибка при получении статистики кэша")
 
 
 @dp.message(F.text.startswith("http"))
@@ -1243,11 +1100,175 @@ async def handle_audio(callback: CallbackQuery):
     cleanup_tmp(TMP_DIR)
 
 
-# ---------------- PLAYLIST HANDLERS (без изменений) ----------------
+# ---------------- PLAYLIST HANDLERS ----------------
 
-# ... (код обработчиков плейлистов остается без изменений из предыдущего сообщения)
-# Чтобы не перегружать ответ, я не копирую весь код плейлистов, но он должен быть здесь
+@dp.callback_query(F.data == "playlist_all")
+async def handle_playlist_all(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    url = USER_URLS.get(user_id)
+    
+    if not url:
+        await callback.message.answer("❌ Ссылка не найдена")
+        return
+    
+    if not check_rate_limit(user_id, RATE_LIMIT_SECONDS * 3):
+        await callback.message.answer("⏳ Подожди немного перед следующим запросом")
+        return
+    
+    await callback.message.edit_reply_markup(reply_markup=None)
+    status = await callback.message.answer("📁 <b>Анализирую плейлист…</b>", parse_mode="HTML")
+    
+    try:
+        # Получаем информацию о плейлисте
+        from info import get_playlist_info
+        playlist_info = await asyncio.to_thread(get_playlist_info, url)
+        
+        if not playlist_info or 'entries' not in playlist_info:
+            await status.edit_text("❌ Не удалось получить информацию о плейлисте")
+            return
+        
+        video_count = len(playlist_info['entries'])
+        if video_count == 0:
+            await status.edit_text("❌ Плейлист пуст")
+            return
+        
+        # Подтверждение для больших плейлистов
+        if video_count > 10:
+            await callback.message.answer(
+                f"⚠️ <b>Внимание!</b>\n\n"
+                f"Плейлист содержит <b>{video_count}</b> видео.\n"
+                f"Это может занять много времени и места.\n\n"
+                f"Продолжить загрузку?",
+                reply_markup=playlist_keyboard(confirm=True),
+                parse_mode="HTML"
+            )
+            USER_DATA[user_id] = {"playlist_info": playlist_info, "status_message": status}
+            return
+        
+        await download_playlist_confirm(callback, user_id, playlist_info, status)
+        
+    except Exception as e:
+        logger.error(f"Error analyzing playlist: {e}")
+        await status.edit_text("❌ Ошибка при анализе плейлиста")
 
+
+@dp.callback_query(F.data == "playlist_confirm_yes")
+async def handle_playlist_confirm(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    
+    data = USER_DATA.get(user_id, {})
+    playlist_info = data.get("playlist_info")
+    status = data.get("status_message")
+    
+    if not playlist_info or not status:
+        await callback.message.answer("❌ Данные плейлиста не найдены")
+        return
+    
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await download_playlist_confirm(callback, user_id, playlist_info, status)
+
+
+async def download_playlist_confirm(callback, user_id, playlist_info, status):
+    """Загружает плейлист после подтверждения"""
+    try:
+        import uuid
+        import shutil
+        
+        video_count = len(playlist_info['entries'])
+        playlist_title = playlist_info.get('title', 'Плейлист')
+        
+        await status.edit_text(
+            f"📁 <b>Начинаю загрузку плейлиста</b>\n\n"
+            f"🎬 Название: {playlist_title}\n"
+            f"📹 Видео: {video_count}\n"
+            f"⏳ Подготовка...",
+            parse_mode="HTML"
+        )
+        
+        cancel_event = threading.Event()
+        ACTIVE_DOWNLOADS[user_id] = {"cancel": cancel_event}
+        loop = asyncio.get_running_loop()
+        progress_cb = make_playlist_progress_cb(loop, status, video_count)
+        
+        # Создаем временную директорию для плейлиста
+        playlist_dir = os.path.join(TMP_DIR, f"playlist_{uuid.uuid4().hex[:8]}")
+        os.makedirs(playlist_dir, exist_ok=True)
+        
+        # Загружаем плейлист
+        downloaded_files = await asyncio.to_thread(
+            download_playlist_videos,
+            playlist_info,
+            playlist_dir,
+            COOKIES_FILE,
+            cancel_event,
+            progress_cb
+        )
+        
+        if cancel_event.is_set():
+            await status.edit_text("⛔ Загрузка плейлиста отменена")
+            shutil.rmtree(playlist_dir, ignore_errors=True)
+            return
+        
+        if not downloaded_files:
+            await status.edit_text("❌ Не удалось загрузить видео из плейлиста")
+            shutil.rmtree(playlist_dir, ignore_errors=True)
+            return
+        
+        # Отправляем файлы частями
+        await status.edit_text(f"📤 <b>Отправляю {len(downloaded_files)} видео…</b>", parse_mode="HTML")
+        
+        # Сортируем файлы по размеру (сначала маленькие)
+        downloaded_files.sort(key=lambda x: os.path.getsize(x))
+        
+        sent_count = 0
+        for i, file_path in enumerate(downloaded_files, 1):
+            if cancel_event.is_set():
+                break
+                
+            try:
+                file_name = os.path.basename(file_path)
+                # Убираем расширение для имени файла
+                display_name = os.path.splitext(file_name)[0]
+                
+                # Отправляем файл с номером в подписи
+                await callback.message.answer_document(
+                    FSInputFile(file_path),
+                    caption=f"🎬 Видео {i}/{len(downloaded_files)}\n📁 {display_name[:50]}"
+                )
+                sent_count += 1
+                
+                # Небольшая пауза между отправками
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"Error sending file {file_path}: {e}")
+                continue
+        
+        total_size = sum(os.path.getsize(f) for f in downloaded_files)
+        total_size_mb = total_size / (1024 * 1024)
+        
+        await callback.message.answer(
+            f"✅ <b>Плейлист загружен!</b>\n\n"
+            f"📁 Видео в плейлисте: {video_count}\n"
+            f"📤 Отправлено: {sent_count}\n"
+            f"💾 Общий размер: {total_size_mb:.1f} МБ\n"
+            f"🎬 Название: {playlist_title}",
+            parse_mode="HTML"
+        )
+        
+        # Очищаем временные файлы
+        shutil.rmtree(playlist_dir, ignore_errors=True)
+        
+    except DownloadCancelled:
+        await status.edit_text("⛔ Загрузка плейлиста отменена")
+    except Exception as e:
+        logger.error(f"Error downloading playlist: {e}")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+    finally:
+        ACTIVE_DOWNLOADS.pop(user_id, None)
+        cleanup_tmp(TMP_DIR)
 # -------------------- entrypoint --------------------
 
 async def main():
