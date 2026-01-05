@@ -5,9 +5,10 @@ import logging
 import subprocess
 import time
 from datetime import datetime
+from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, InputMediaDocument
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 
@@ -21,11 +22,22 @@ from config import (
     CACHE_MAX_AGE_DAYS,
     CACHE_MAX_SIZE_MB,
 )
-from keyboards import quality_keyboard, cancel_keyboard
-from downloader import download_video, download_audio, DownloadCancelled
+from keyboards import (
+    quality_keyboard, 
+    cancel_keyboard, 
+    playlist_keyboard,
+    platform_keyboard
+)
+from downloader import (
+    download_video, 
+    download_audio, 
+    download_original_quality,
+    download_playlist_videos,
+    DownloadCancelled
+)
 from middleware import PrivateMiddleware
 from rate_limit import check_rate_limit
-from info import extract_info
+from info import extract_info, is_playlist, get_platform_info
 from cache import cache_key, cache_path
 from cleanup import cleanup_tmp
 
@@ -55,6 +67,7 @@ dp.message.middleware(private_middleware)
 dp.callback_query.middleware(private_middleware)
 
 USER_URLS: dict[int, str] = {}
+USER_DATA: dict[int, dict] = {}  # Для хранения дополнительных данных
 ACTIVE_DOWNLOADS: dict[int, dict] = {}
 
 # -------------------- cache cleaning --------------------
@@ -232,6 +245,41 @@ def make_progress_cb(loop, message):
     return cb
 
 
+def make_playlist_progress_cb(loop, message, total_videos: int):
+    current_video = {"value": 0}
+    last_update = {"time": 0}
+
+    async def update(d):
+        try:
+            # Обновляем не чаще чем раз в 3 секунды
+            current_time = time.time()
+            if current_time - last_update["time"] < 3:
+                return
+                
+            last_update["time"] = current_time
+
+            if d.get("status") == "finished":
+                current_video["value"] += 1
+                
+                text = (
+                    f"📁 <b>Загрузка плейлиста</b>\n"
+                    f"📹 Видео: {current_video['value']}/{total_videos}\n"
+                    f"⏳ Продолжаем загрузку..."
+                )
+
+                await message.edit_text(
+                    text,
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.error(f"Error updating playlist progress: {e}")
+
+    def cb(d):
+        asyncio.run_coroutine_threadsafe(update(d), loop)
+
+    return cb
+
+
 def optimize_for_telegram(input_path: str, output_path: str) -> bool:
     """
     Оптимизирует видео для телеграма
@@ -289,8 +337,31 @@ async def start(message: Message):
     await message.answer(
         "👋 <b>Привет!</b>\n\n"
         "📥 Я скачиваю <b>видео</b> и <b>звук из видео</b> по ссылке.\n\n"
-        "🔄 Кэш автоматически очищается раз в сутки\n"
+        "✨ <b>Новые возможности:</b>\n"
+        "• 🎬 Оригинальное качество (Instagram, TikTok)\n"
+        "• 📁 Плейлисты YouTube\n"
+        "• 🔄 Автоочистка кэша\n\n"
         "👉 Просто отправь ссылку.",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(F.text == "/help")
+async def help_command(message: Message):
+    await message.answer(
+        "📚 <b>Справка по командам:</b>\n\n"
+        "• <code>/start</code> - Начать работу\n"
+        "• <code>/help</code> - Эта справка\n"
+        "• <code>/cache_stats</code> - Статистика кэша\n\n"
+        "✨ <b>Поддерживаемые платформы:</b>\n"
+        "• YouTube (видео и плейлисты)\n"
+        "• TikTok (оригинальное качество)\n"
+        "• Instagram (Reels, видео, IGTV)\n"
+        "• Twitter/X, Facebook, VK и другие\n\n"
+        "🎯 <b>Особенности:</b>\n"
+        "• Instagram/TikTok: есть опция оригинального качества\n"
+        "• Плейлисты: загрузка всех видео из плейлиста\n"
+        "• Аудио: извлечение звука из любого видео",
         parse_mode="HTML"
     )
 
@@ -345,12 +416,44 @@ async def cache_stats(message: Message):
 @dp.message(F.text.startswith("http"))
 async def handle_link(message: Message):
     url = message.text.strip()
-    USER_URLS[message.from_user.id] = url
-    await message.answer(
-        "🔽 <b>Выбери формат загрузки:</b>",
-        reply_markup=quality_keyboard(),
-        parse_mode="HTML"
-    )
+    user_id = message.from_user.id
+    
+    USER_URLS[user_id] = url
+    
+    # Проверяем, является ли ссылка плейлистом
+    try:
+        is_playlist_url = await asyncio.to_thread(is_playlist, url)
+        if is_playlist_url:
+            USER_DATA[user_id] = {"is_playlist": True}
+            await message.answer(
+                "📁 <b>Обнаружен плейлист!</b>\n\n"
+                "Выберите действие:",
+                reply_markup=playlist_keyboard(),
+                parse_mode="HTML"
+            )
+            return
+    except:
+        pass
+    
+    # Определяем платформу
+    platform_info = await asyncio.to_thread(get_platform_info, url)
+    
+    # Для Instagram и TikTok предлагаем оригинальное качество
+    if platform_info in ["instagram", "tiktok"]:
+        USER_DATA[user_id] = {"platform": platform_info}
+        await message.answer(
+            f"🎬 <b>Ссылка с {platform_info.capitalize()}</b>\n\n"
+            "Выберите качество загрузки:",
+            reply_markup=platform_keyboard(platform_info),
+            parse_mode="HTML"
+        )
+    else:
+        # Для других платформ обычное меню
+        await message.answer(
+            "🔽 <b>Выбери формат загрузки:</b>",
+            reply_markup=quality_keyboard(),
+            parse_mode="HTML"
+        )
 
 
 @dp.callback_query(F.data == "cancel")
@@ -366,7 +469,323 @@ async def cancel_download(callback: CallbackQuery):
         await callback.answer("❌ Нет активной загрузки", show_alert=True)
 
 
-# ---------------- VIDEO ----------------
+# ---------------- PLAYLIST HANDLERS ----------------
+
+@dp.callback_query(F.data == "playlist_all")
+async def handle_playlist_all(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    url = USER_URLS.get(user_id)
+    
+    if not url:
+        await callback.message.answer("❌ Ссылка не найдена")
+        return
+    
+    if not check_rate_limit(user_id, RATE_LIMIT_SECONDS * 3):  # Больший лимит для плейлистов
+        await callback.message.answer("⏳ Подожди немного перед следующим запросом")
+        return
+    
+    await callback.message.edit_reply_markup(reply_markup=None)
+    status = await callback.message.answer("📁 <b>Анализирую плейлист…</b>", parse_mode="HTML")
+    
+    try:
+        # Получаем информацию о плейлисте
+        from info import get_playlist_info
+        playlist_info = await asyncio.to_thread(get_playlist_info, url)
+        
+        if not playlist_info or 'entries' not in playlist_info:
+            await status.edit_text("❌ Не удалось получить информацию о плейлисте")
+            return
+        
+        video_count = len(playlist_info['entries'])
+        if video_count == 0:
+            await status.edit_text("❌ Плейлист пуст")
+            return
+        
+        # Подтверждение для больших плейлистов
+        if video_count > 10:
+            await callback.message.answer(
+                f"⚠️ <b>Внимание!</b>\n\n"
+                f"Плейлист содержит <b>{video_count}</b> видео.\n"
+                f"Это может занять много времени и места.\n\n"
+                f"Продолжить загрузку?",
+                reply_markup=playlist_keyboard(confirm=True),
+                parse_mode="HTML"
+            )
+            USER_DATA[user_id] = {"playlist_info": playlist_info, "status_message": status}
+            return
+        
+        await download_playlist_confirm(callback, user_id, playlist_info, status)
+        
+    except Exception as e:
+        logger.error(f"Error analyzing playlist: {e}")
+        await status.edit_text("❌ Ошибка при анализе плейлиста")
+
+
+@dp.callback_query(F.data == "playlist_confirm_yes")
+async def handle_playlist_confirm(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    
+    data = USER_DATA.get(user_id, {})
+    playlist_info = data.get("playlist_info")
+    status = data.get("status_message")
+    
+    if not playlist_info or not status:
+        await callback.message.answer("❌ Данные плейлиста не найдены")
+        return
+    
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await download_playlist_confirm(callback, user_id, playlist_info, status)
+
+
+async def download_playlist_confirm(callback, user_id, playlist_info, status):
+    """Загружает плейлист после подтверждения"""
+    try:
+        video_count = len(playlist_info['entries'])
+        playlist_title = playlist_info.get('title', 'Плейлист')
+        
+        await status.edit_text(
+            f"📁 <b>Начинаю загрузку плейлиста</b>\n\n"
+            f"🎬 Название: {playlist_title}\n"
+            f"📹 Видео: {video_count}\n"
+            f"⏳ Подготовка...",
+            parse_mode="HTML"
+        )
+        
+        cancel_event = threading.Event()
+        ACTIVE_DOWNLOADS[user_id] = {"cancel": cancel_event}
+        loop = asyncio.get_running_loop()
+        progress_cb = make_playlist_progress_cb(loop, status, video_count)
+        
+        # Создаем временную директорию для плейлиста
+        import uuid
+        playlist_dir = os.path.join(TMP_DIR, f"playlist_{uuid.uuid4().hex[:8]}")
+        os.makedirs(playlist_dir, exist_ok=True)
+        
+        # Загружаем плейлист
+        downloaded_files = await asyncio.to_thread(
+            download_playlist_videos,
+            playlist_info,
+            playlist_dir,
+            COOKIES_FILE,
+            cancel_event,
+            progress_cb
+        )
+        
+        if cancel_event.is_set():
+            await status.edit_text("⛔ Загрузка плейлиста отменена")
+            # Очищаем временные файлы
+            import shutil
+            shutil.rmtree(playlist_dir, ignore_errors=True)
+            return
+        
+        if not downloaded_files:
+            await status.edit_text("❌ Не удалось загрузить видео из плейлиста")
+            shutil.rmtree(playlist_dir, ignore_errors=True)
+            return
+        
+        # Отправляем файлы частями (телеграм лимит - 10 файлов в группе)
+        await status.edit_text(f"📤 <b>Отправляю {len(downloaded_files)} видео…</b>", parse_mode="HTML")
+        
+        for i in range(0, len(downloaded_files), 10):
+            batch = downloaded_files[i:i+10]
+            media_group = []
+            
+            for file_path in batch:
+                media_group.append(
+                    InputMediaDocument(
+                        media=FSInputFile(file_path),
+                        caption=f"🎬 {os.path.basename(file_path)}" if i == 0 else None
+                    )
+                )
+            
+            try:
+                await callback.message.answer_media_group(media_group)
+            except Exception as e:
+                logger.error(f"Error sending media group: {e}")
+                # Отправляем по одному если группа не работает
+                for file_path in batch:
+                    try:
+                        await callback.message.answer_document(FSInputFile(file_path))
+                    except:
+                        pass
+            
+            # Небольшая пауза между группами
+            await asyncio.sleep(1)
+        
+        total_size = sum(os.path.getsize(f) for f in downloaded_files)
+        total_size_mb = total_size / (1024 * 1024)
+        
+        await callback.message.answer(
+            f"✅ <b>Плейлист загружен!</b>\n\n"
+            f"📁 Видео: {len(downloaded_files)}\n"
+            f"💾 Общий размер: {total_size_mb:.1f} МБ\n"
+            f"🎬 Название: {playlist_title}",
+            parse_mode="HTML"
+        )
+        
+        # Очищаем временные файлы
+        shutil.rmtree(playlist_dir, ignore_errors=True)
+        
+    except DownloadCancelled:
+        await status.edit_text("⛔ Загрузка плейлиста отменена")
+    except Exception as e:
+        logger.error(f"Error downloading playlist: {e}")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+    finally:
+        ACTIVE_DOWNLOADS.pop(user_id, None)
+        cleanup_tmp(TMP_DIR)
+
+
+@dp.callback_query(F.data == "playlist_confirm_no")
+async def handle_playlist_cancel(callback: CallbackQuery):
+    await callback.answer("Отменено", show_alert=True)
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+
+@dp.callback_query(F.data == "playlist_first")
+async def handle_playlist_first(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    url = USER_URLS.get(user_id)
+    
+    if not url:
+        await callback.message.answer("❌ Ссылка не найдена")
+        return
+    
+    # Получаем первое видео из плейлиста
+    try:
+        from info import get_first_video_from_playlist
+        video_url = await asyncio.to_thread(get_first_video_from_playlist, url)
+        
+        if not video_url:
+            await callback.message.answer("❌ Не удалось получить видео из плейлиста")
+            return
+        
+        # Сохраняем новую ссылку и показываем меню выбора качества
+        USER_URLS[user_id] = video_url
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "🔽 <b>Выбери формат загрузки для первого видео:</b>",
+            reply_markup=quality_keyboard(),
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting first video: {e}")
+        await callback.message.answer("❌ Ошибка при получении видео из плейлиста")
+
+
+# ---------------- ORIGINAL QUALITY HANDLERS ----------------
+
+@dp.callback_query(F.data == "original_quality")
+async def handle_original_quality(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    url = USER_URLS.get(user_id)
+    
+    if not url:
+        await callback.message.answer("❌ Ссылка не найдена")
+        return
+    
+    if not check_rate_limit(user_id, RATE_LIMIT_SECONDS):
+        await callback.message.answer("⏳ Подожди немного перед следующим запросом")
+        return
+    
+    await callback.message.edit_reply_markup(reply_markup=None)
+    status = await callback.message.answer("🎬 <b>Загрузка в оригинальном качестве…</b>", parse_mode="HTML")
+    
+    key = cache_key(url, "original", audio=False)
+    final_path = cache_path(CACHE_DIR, key, "mp4")
+    tmp_path = os.path.join(TMP_DIR, f"{key}.mp4")
+    
+    # Проверяем кэш
+    if os.path.exists(final_path):
+        await status.edit_text("📤 <b>Отправляю файл из кэша…</b>", parse_mode="HTML")
+        try:
+            await callback.message.answer_video(FSInputFile(final_path))
+            size_mb = os.path.getsize(final_path) / 1024 / 1024
+            await callback.message.answer(
+                f"✅ <b>Готово! (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Error sending cached file: {e}")
+            await status.edit_text("❌ Ошибка при отправке файла")
+        return
+    
+    cancel_event = threading.Event()
+    ACTIVE_DOWNLOADS[user_id] = {"cancel": cancel_event}
+    loop = asyncio.get_running_loop()
+    progress_cb = make_progress_cb(loop, status)
+    
+    try:
+        await asyncio.to_thread(
+            download_original_quality,
+            url,
+            tmp_path,
+            COOKIES_FILE,
+            cancel_event,
+            progress_cb,
+        )
+        
+        if cancel_event.is_set():
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            await status.edit_text("⛔ Загрузка отменена")
+            return
+            
+        os.rename(tmp_path, final_path)
+        
+    except DownloadCancelled:
+        await status.edit_text("⛔ Загрузка отменена")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return
+    except Exception as e:
+        logger.error(f"Error downloading original quality: {e}")
+        await status.edit_text(
+            "❌ Не удалось скачать в оригинальном качестве\n"
+            "💡 Попробуй обычное качество"
+        )
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return
+    finally:
+        ACTIVE_DOWNLOADS.pop(user_id, None)
+    
+    await status.edit_text("📤 <b>Отправляю видео…</b>", parse_mode="HTML")
+    
+    try:
+        await callback.message.answer_video(
+            FSInputFile(final_path),
+            supports_streaming=True
+        )
+        size_mb = os.path.getsize(final_path) / 1024 / 1024
+        await callback.message.answer(
+            f"✅ <b>Готово! (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error sending video: {e}")
+        try:
+            await callback.message.answer_document(FSInputFile(final_path))
+            size_mb = os.path.getsize(final_path) / 1024 / 1024
+            await callback.message.answer(
+                f"✅ <b>Отправлено как документ (Оригинальное качество)</b>\n📦 Размер: {size_mb:.1f} МБ",
+                parse_mode="HTML"
+            )
+        except Exception as e2:
+            logger.error(f"Error sending as document: {e2}")
+            await status.edit_text("❌ Ошибка при отправке файла")
+            if os.path.exists(final_path):
+                os.remove(final_path)
+    
+    cleanup_tmp(TMP_DIR)
+
+
+# ---------------- VIDEO HANDLER (стандартное качество) ----------------
 
 @dp.callback_query(F.data.startswith("q:"))
 async def handle_video(callback: CallbackQuery):
@@ -440,15 +859,19 @@ async def handle_video(callback: CallbackQuery):
             await status.edit_text("⛔ Загрузка отменена")
             return
             
-        # Оптимизируем видео для телеграма
-        await status.edit_text("⚙️ <b>Оптимизирую видео для телеграма…</b>", parse_mode="HTML")
-        await asyncio.to_thread(optimize_for_telegram, tmp_path, optimized_path)
-        
-        # Удаляем исходный файл и используем оптимизированный
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        # Оптимизируем видео для телеграма (кроме оригинального качества)
+        if quality != "original":
+            await status.edit_text("⚙️ <b>Оптимизирую видео для телеграма…</b>", parse_mode="HTML")
+            await asyncio.to_thread(optimize_for_telegram, tmp_path, optimized_path)
             
-        os.rename(optimized_path, final_path)
+            # Удаляем исходный файл и используем оптимизированный
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+                
+            os.rename(optimized_path, final_path)
+        else:
+            # Для оригинального качества не оптимизируем
+            os.rename(tmp_path, final_path)
         
     except DownloadCancelled:
         await status.edit_text("⛔ Загрузка отменена")
@@ -499,7 +922,7 @@ async def handle_video(callback: CallbackQuery):
     cleanup_tmp(TMP_DIR)
 
 
-# ---------------- AUDIO FROM VIDEO ----------------
+# ---------------- AUDIO HANDLER (остается без изменений) ----------------
 
 @dp.callback_query(F.data == "audio")
 async def handle_audio(callback: CallbackQuery):
