@@ -4,6 +4,7 @@ import os
 import logging
 import subprocess
 import json
+import shutil  # Импортируем shutil глобально
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,8 @@ def download_video(
             "tiktok": {"skip_impersonation": True},
             "instagram": {"skip_impersonation": True},
         },
-        "writedescription": True,  # Сохраняем описание
-        "writeinfojson": True,  # Сохраняем информацию в JSON
+        "writedescription": True,
+        "writeinfojson": True,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -55,9 +56,11 @@ def download_video(
         
         # Сохраняем информацию о видео рядом с файлом
         info_file = out_path.replace('.mp4', '.info.json')
-        if os.path.exists(info_file):
+        try:
             with open(info_file, 'w', encoding='utf-8') as f:
                 json.dump(info, f, ensure_ascii=False, indent=2)
+        except:
+            pass
 
 
 # ---------------- ORIGINAL QUALITY ----------------
@@ -71,7 +74,7 @@ def download_original_quality(
 ):
     """Скачивает видео в оригинальном качестве"""
     ydl_opts = {
-        "format": "best",  # Лучшее качество доступное
+        "format": "best",
         "outtmpl": out_path,
         "merge_output_format": "mp4",
         "cookiefile": cookies,
@@ -92,9 +95,11 @@ def download_original_quality(
         
         # Сохраняем информацию о видео
         info_file = out_path.replace('.mp4', '.info.json')
-        if os.path.exists(info_file):
+        try:
             with open(info_file, 'w', encoding='utf-8') as f:
                 json.dump(info, f, ensure_ascii=False, indent=2)
+        except:
+            pass
 
 
 # ---------------- TIKTOK MUSIC ONLY ----------------
@@ -106,7 +111,7 @@ def download_tiktok_music(
     cancel_event: threading.Event,
     progress_cb,
 ):
-    """Скачивает только звук из TikTok (оригинальную музыку)"""
+    """Скачивает только звук из TikTok"""
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": out_path.replace('.mp3', ''),
@@ -125,13 +130,10 @@ def download_tiktok_music(
         "extractor_args": {
             "tiktok": {
                 "skip_impersonation": True,
-                "music": True,  # Специальный флаг для музыки TikTok
             },
         },
         "writethumbnail": True,
         "writeinfojson": True,
-        # Для TikTok стараемся получить оригинальный звук
-        "extract_flat": False,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -139,9 +141,11 @@ def download_tiktok_music(
         
         # Сохраняем информацию о звуке
         info_file = out_path.replace('.mp3', '.info.json')
-        if os.path.exists(info_file):
+        try:
             with open(info_file, 'w', encoding='utf-8') as f:
                 json.dump(info, f, ensure_ascii=False, indent=2)
+        except:
+            pass
 
 
 # ---------------- ADD METADATA TO VIDEO/AUDIO ----------------
@@ -159,7 +163,6 @@ def add_metadata_to_video(
         
         if not (is_video or is_audio):
             # Если не поддерживаемый формат, просто копируем файл
-            import shutil
             shutil.copy2(input_path, output_path)
             return
         
@@ -190,7 +193,7 @@ def add_metadata_to_video(
             cmd = [
                 'ffmpeg',
                 '-i', input_path,
-                '-c', 'copy',  # Копируем без перекодировки
+                '-c', 'copy',
                 '-movflags', '+faststart',
                 '-y',
                 *metadata_args,
@@ -218,16 +221,14 @@ def add_metadata_to_video(
         if result.returncode != 0:
             logger.error(f"FFmpeg metadata error: {result.stderr}")
             # Если не удалось добавить метаданные, копируем файл как есть
-            import shutil
             shutil.copy2(input_path, output_path)
             
     except Exception as e:
         logger.error(f"Error adding metadata: {e}")
-        import shutil
         shutil.copy2(input_path, output_path)
 
 
-# ---------------- PLAYLIST DOWNLOAD ----------------
+# ---------------- PLAYLIST DOWNLOAD (ИСПРАВЛЕННАЯ ВЕРСИЯ) ----------------
 
 def download_playlist_videos(
     playlist_info: dict,
@@ -236,12 +237,13 @@ def download_playlist_videos(
     cancel_event: threading.Event,
     progress_cb,
 ) -> List[str]:
-    """Скачивает все видео из плейлиста"""
+    """Скачивает все видео из плейлиста - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     downloaded_files = []
     
+    # Создаем yt-dlp объект для загрузки каждого видео отдельно
     ydl_opts = {
         "format": "best[height<=1080]/best",
-        "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
+        "outtmpl": os.path.join(output_dir, "%(title)s [%(id)s].%(ext)s"),  # Добавляем ID для уникальности
         "merge_output_format": "mp4",
         "cookiefile": cookies,
         "progress_hooks": [_progress_hook(cancel_event, progress_cb)],
@@ -251,31 +253,61 @@ def download_playlist_videos(
         "extract_flat": False,
         "writedescription": True,
         "writeinfojson": True,
+        "nooverwrites": True,  # Не перезаписывать существующие файлы
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            for entry in playlist_info.get('entries', []):
+            entries = playlist_info.get('entries', [])
+            total_videos = len(entries)
+            
+            logger.info(f"Starting playlist download with {total_videos} videos")
+            
+            for i, entry in enumerate(entries, 1):
                 if cancel_event.is_set():
                     raise DownloadCancelled("Cancelled by user")
                 
                 if not entry.get('url'):
+                    logger.warning(f"Entry {i} has no URL, skipping")
                     continue
                 
+                video_url = entry['url']
+                video_title = entry.get('title', f'Video {i}')
+                
+                logger.info(f"Downloading video {i}/{total_videos}: {video_title}")
+                
                 try:
-                    ydl.download([entry['url']])
+                    # Загружаем видео
+                    info = ydl.extract_info(video_url, download=True)
                     
-                    # Ищем скачанный файл
-                    for filename in os.listdir(output_dir):
-                        if filename.endswith(('.mp4', '.mkv', '.webm')):
-                            file_path = os.path.join(output_dir, filename)
-                            downloaded_files.append(file_path)
-                            break
+                    if not info:
+                        logger.error(f"Failed to extract info for video {i}")
+                        continue
+                    
+                    # Получаем имя фактически созданного файла
+                    filename = ydl.prepare_filename(info)
+                    
+                    # Проверяем существование файла
+                    if os.path.exists(filename):
+                        downloaded_files.append(filename)
+                        logger.info(f"Successfully downloaded: {os.path.basename(filename)}")
+                    else:
+                        # Ищем файл с другим расширением
+                        base_name = filename.rsplit('.', 1)[0]
+                        for ext in ['.mp4', '.mkv', '.webm', '.flv']:
+                            alt_path = base_name + ext
+                            if os.path.exists(alt_path):
+                                downloaded_files.append(alt_path)
+                                logger.info(f"Found file with extension {ext}: {os.path.basename(alt_path)}")
+                                break
+                        else:
+                            logger.error(f"File not found for video {i}")
                             
                 except Exception as e:
-                    logger.error(f"Error downloading video {entry.get('title')}: {e}")
+                    logger.error(f"Error downloading video {i} ({video_title}): {e}")
                     continue
         
+        logger.info(f"Playlist download complete. Downloaded {len(downloaded_files)} files")
         return downloaded_files
         
     except Exception as e:
@@ -322,6 +354,8 @@ def download_audio(
         
         # Сохраняем информацию о аудио
         info_file = out_path.replace('.mp3', '.info.json')
-        if os.path.exists(info_file):
+        try:
             with open(info_file, 'w', encoding='utf-8') as f:
                 json.dump(info, f, ensure_ascii=False, indent=2)
+        except:
+            pass
